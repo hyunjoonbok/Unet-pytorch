@@ -1,11 +1,11 @@
 # A function to separate each TIF frame which consists of 30 frames total
-# %%
+
 # Import Packages
 import os
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
-# %%
+
 # Load data
 dir_data = './datasets'
 
@@ -17,7 +17,7 @@ img_input = Image.open(os.path.join(dir_data, name_input))
 
 ny, nx = img_label.size
 nframe = img_label.n_frames
-# %%
+
 # Out of 30 frames, we store 24 frames (80%) into training 
 # and 3 frames (10%) into validation, and remainig 3 frames (10%) into testing
 nframe_train = 24
@@ -37,7 +37,6 @@ if not os.path.exists(dir_save_val):
 if not os.path.exists(dir_save_test):
     os.makedirs(dir_save_test)
     
-# %%
 # Randomly store train/val/test data
 id_frame = np.arange(nframe)
 np.random.shuffle(id_frame)
@@ -88,10 +87,10 @@ for i in range(nframe_test):
     
 # %%
 # Load the sample image   
-plt.subplot(130)
+plt.subplot(121)
 plt.imshow(label_, cmap='gray')
 plt.title('label')
 
-plt.subplot(132)
+plt.subplot(122)
 plt.imshow(input_, cmap='gray')
 plt.title('input')
