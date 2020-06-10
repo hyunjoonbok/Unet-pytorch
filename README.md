@@ -1,5 +1,6 @@
 # Unet-pytorch
-U-Net in Pytorch
+U-Net Architecture Full Pytorch Implementation
+
 #### Title
 U-Net: Convolutional Networks for Biomedical Image Segmentation
 
