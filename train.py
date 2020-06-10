@@ -13,192 +13,243 @@ import numpy as np
 import os
 import random
 
+import matplotlib.pyplot as plt
+
+# Load functions from other Python files
+from model import UNet # Model
+from dataset import * # Dataset / Transform
+from util import * # Save/Load 
+
+# Parser
+## It allows to change variables dynamiaclly outside the environement
+
+import argparse
+
+parser = argparse.ArgumentParser(description="Train UNet",
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument("--lr", default=1e-3, type=float, dest="lr")
+parser.add_argument("--batch_size", default=4, type=int, dest="batch_size")
+parser.add_argument("--num_epoch", default=100, type=int, dest="num_epoch")
+
+parser.add_argument("--data_dir", default="./datasets", type=str, dest="data_dir")
+parser.add_argument("--ckpt_dir", default="./checkpoint", type=str, dest="ckpt_dir")
+parser.add_argument("--log_dir", default="./log", type=str, dest="log_dir")
+parser.add_argument("--result_dir", default="./result", type=str, dest="result_dir")
+
+parser.add_argument("--mode", default="train", type=str, dest="mode")
+parser.add_argument("--train_continue", default="off", type=str, dest="train_continue")
+
+# Extra flag to see whether we are training or evaluating
+parser.add_argument("--mode", default="train", type=str, dest="mode")
+parser.add_argument("--train_continue", default="off", type=str, dest="train_continue")
+
+# parsing all arguments 
+args = parser.parse_args()
+
+
+
 # Set up HyperParameters
-lr = 1e-3 # Learning-rate
-batch_size = 4
-num_epoch = 100
+# Adding Parser to each parameters
+lr = args.lr # Learning-rate
+batch_size = args.batch_size
+num_epoch = args.num_epoch
 
-data_dir = './datasets' 
-ckpt_dir = './checkpoint' # trained networks saved
-log_dir = './log' # tensorboard log files saved
+data_dir = args.data_dir
+ckpt_dir = args.ckpt_dir # trained networks saved
+log_dir = args.log_dir # tensorboard log files saved
+result_dir = args.result_dir
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+mode = args.mode
+train_continue = args.train_continue
 
-# U-Net Model Architecture
+print("learning rate: %.4e" % lr)
+print("batch size: %d" % batch_size)
+print("number of epoch: %d" % num_epoch)
+print("data dir: %s" % data_dir)
+print("ckpt dir: %s" % ckpt_dir)
+print("log dir: %s" % log_dir)
+print("result dir: %s" % result_dir)
+print("mode: %s" % mode)
+
+## Create directory
+if not os.path.exists(result_dir):
+    os.makedirs(os.path.join(result_dir, 'png'))
+    os.makedirs(os.path.join(result_dir, 'numpy'))
+
+# Train Mode    
+if mode == 'train':
+    transform = transforms.Compose([Normalization(mean=0.5, std=0.5), RandomFlip(), ToTensor()])
+
+    dataset_train = Dataset(data_dir=os.path.join(data_dir, 'train'), transform=transform)
+    loader_train = DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8)
+
+    dataset_val = Dataset(data_dir=os.path.join(data_dir, 'val'), transform=transform)
+    loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, num_workers=8)
+
+    # Other variables
+    num_data_train = len(dataset_train)
+    num_data_val = len(dataset_val)
+
+    num_batch_train = np.ceil(num_data_train / batch_size)
+    num_batch_val = np.ceil(num_data_val / batch_size)
+else:
+    transform = transforms.Compose([Normalization(mean=0.5, std=0.5), ToTensor()])
+
+    dataset_test = Dataset(data_dir=os.path.join(data_dir, 'test'), transform=transform)
+    loader_test = DataLoader(dataset_test, batch_size=batch_size, shuffle=False, num_workers=8)
+
+    # Other variables
+    num_data_test = len(dataset_test)
+
+    num_batch_test = np.ceil(num_data_test / batch_size)
 
 
+# Define Model
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model = UNet()
+net = model.to(device) # running on GPU
 
-## Image Attach Here ##
+# Loss function
+fn_loss = nn.BCEWithLogitsLoss().to(device)
 
+# Optimizer (Adam Optim)
+optim = torch.optim.Adam(net.parameters(), lr= lr)   
 
+## Other functions to store output
+# 1. From tensor --> numpy
+fn_tonumpy = lambda x: x.to('cpu').detach().numpy().transpose(0, 2, 3, 1)
+# 2. denormalization
+fn_denorm = lambda x, mean, std: (x * std) + mean
+# 3. classification using our threshhold, which is 0.5
+fn_class = lambda x: 1.0 * (x > 0.5)
 
-# Create U-net Layers 
-class UNet(nn.Module):
-    def __init__(self):
-        super(UNet, self).__init__()
-        
-        # Claim the layers that are needed in Init
-        def CBR2d(in_channels, out_channels, kernel_size = 3,
-                  stride = 1, padding = 1, bias = True):  #Convolutional, Batch-Normalization, Relu, and 2d
-            layers = []
-            # 1. Convolutional Layer
-            layers += [nn.Conv2d(in_channels = in_channels, out_channels = out_channels, 
-                                 kernel_size = kernel_size, stride = stride, padding = padding,
-                                 bias = bias)]
-            # 2. Batch-Normalization Layer
-            layers += [nn.BatchNorm2d(num_features = out_channels)]
+# Summary writer to use Tensorboard
+writer_train = SummaryWriter(log_dir=os.path.join(log_dir, 'train'))
+writer_val = SummaryWriter(log_dir=os.path.join(log_dir, 'val'))
+
+# Training Start!
+st_epoch = 0
+if mode == 'train':
+    # If there are any saved model (that are quit unexpectadly), 
+    # we load and continue training from where it stopped
+    if train_continue == "on":
+        net, optim, st_epoch = load(ckpt_dir=ckpt_dir, net=net, optim=optim)
+
+    for epoch in range(st_epoch + 1, num_epoch + 1):
+        net.train()
+        loss_arr = []
+
+        for batch, data in enumerate(loader_train, 1):
+            # forward pass
+            label = data['label'].to(device)
+            input = data['input'].to(device)
+
+            output = net(input)
+
+            # backward pass
+            optim.zero_grad()
+
+            loss = fn_loss(output, label)
+            loss.backward()
+
+            optim.step()
+                
+        # Calculate Loss 
+            loss_arr += [loss.item()]
             
-            # 3. Relu Layer
-            cbr = nn.Sequential(*layers)
+            print("TRAIN: EPOCH %04d / %04d | BATCH %04d / %04d | LOSS %.4f" %
+                (epoch, num_epoch, batch, num_batch_train, np.mean(loss_arr)))
             
-            return cbr
-        
-        # Encoder Path (downsampling)
-        
-        # "kernel_size = 3, stride = 1, padding = 1, bias = True" can be skipped as it's already predefined above
-        # First block at the first stage        
-        self.enc1_1 = CBR2d(in_channels = 1, out_channels = 64, kernel_size = 3, stride = 1, padding = 1, bias = True)
-        # Second block at the first stage
-        self.enc1_2 = CBR2d(in_channels = 1, out_channels = 64, kernel_size = 3, stride = 1, padding = 1, bias = True)
-        # Max-poolding 2x2 layer
-        self.pool1 = nn.MaxPool2d(kernel_size = 2)
-        
-        # First block at the Second stage 
-        self.enc2_1 = CBR2d(in_channels = 64, out_channels = 128)
-        self.enc2_2 = CBR2d(in_channels = 64, out_channels = 128) 
-
-        # Max-poolding 2x2 layer
-        self.pool2 = nn.MaxPool2d(kernel_size = 2)
-        
-        # First block at the Third stage 
-        self.enc3_1 = CBR2d(in_channels = 128, out_channels = 256)
-        # Second block at the Third stage
-        self.enc3_2 = CBR2d(in_channels = 128, out_channels = 256) 
-               
-        # Max-poolding 2x2 layer
-        self.pool3 = nn.MaxPool2d(kernel_size = 2)
-        
-        # First block at the Fourth stage 
-        self.enc4_1 = CBR2d(in_channels = 256, out_channels = 512)
-        # Second block at the Fourth stage
-        self.enc4_2 = CBR2d(in_channels = 256, out_channels = 512) 
-               
-        # Max-poolding 2x2 layer
-        self.pool4 = nn.MaxPool2d(kernel_size = 2)   
-        
-        # First block at the Fifth stage 
-        self.enc5_1 = CBR2d(in_channels = 512, out_channels = 1024)               
-        
+            # Tensorboard Output
+            label = fn_tonumpy(label)
+            input = fn_tonumpy(fn_denorm(input, mean=0.5, std=0.5))
+            output = fn_tonumpy(fn_class(output))
             
-        # Decoder Path (upsampling)
-        self.dec5_1 = CBR2d(in_channels = 1024, out_channels = 512)  
+            writer_train.add_image('label', label, num_batch_train * (epoch - 1) + batch, dataformats='NHWC')
+            writer_train.add_image('input', input, num_batch_train * (epoch - 1) + batch, dataformats='NHWC')
+            writer_train.add_image('output', output, num_batch_train * (epoch - 1) + batch, dataformats='NHWC')
+            
+        # Add loss to Tensorboard
+        writer_train.add_scalar('loss', np.mean(loss_arr), epoch)
         
-        # Up-convolution 2x2
-        self.unpool4 = nn.ConvTranspose2d(in_channels = 512, out_channels = 512,
-                                         kernel_size = 2, stride = 2, padding = 0, bias = True)
- 
-        # Second block at the Fourth stage       
-        self.dec4_2 = CBR2d(in_channels = 2*512, out_channels = 512)
-        # First block at the Fourth stage 
-        self.dec4_1 = CBR2d(in_channels = 512, out_channels = 256)
-        
-        # Up-convolution 2x2
-        self.unpool3 = nn.ConvTranspose2d(in_channels = 256, out_channels = 256,
-                                         kernel_size = 2, stride = 2, padding = 0, bias = True)
-        # Second block at the Third stage       
-        self.dec3_2 = CBR2d(in_channels = 2*256, out_channels = 256)
-        # First block at the Third stage 
-        self.dec3_1 = CBR2d(in_channels = 256, out_channels = 128)
+        # Validation Start
+        with torch.no_grad(): # This disable backward pass 
+            net.eval() # Evaludation Mode
+            loss_arr = []
+            
+            for batch, data in enumerate(loader_test, 1):
+                # forward pass
+                label = data['label'].to(device)
+                input = data['input'].to(device)
 
-        # Up-convolution 2x2
-        self.unpool2 = nn.ConvTranspose2d(in_channels = 128, out_channels = 128,
-                                         kernel_size = 2, stride = 2, padding = 0, bias = True)
-        # Second block at the Second stage       
-        self.dec2_2 = CBR2d(in_channels = 2*128, out_channels = 128)
-        # First block at the Second stage 
-        self.dec2_1 = CBR2d(in_channels = 128, out_channels = 64)
-        
-        # Up-convolution 2x2
-        self.unpool1 = nn.ConvTranspose2d(in_channels = 64, out_channels = 64,
-                                         kernel_size = 2, stride = 2, padding = 0, bias = True)
-        # Second block at the First stage       
-        self.dec1_2 = CBR2d(in_channels = 2*64, out_channels = 64)
-        # First block at the First stage 
-        self.dec1_1 = CBR2d(in_channels = 64, out_channels = 64)        
+                output = net(input)
 
-        # Output layer   (1 x 1 Conv Layer)
-        self.fc = nn.Conv2d(in_channels = 64, out_channels = 2,
-                            kernel_size = 1, stride = 1, padding = 0, bias = True)
-    
-    
-    def forward(self, x): # x is a input image
-        # 1. Connect the Encoder part
-        enc1_1 = self.enc1_1(x)
-        enc1_2 = self.enc1_1(enc1_1)
-        pool1 = self.pool1(enc1_2)
-        
-        enc2_1 = self.enc2_1(pool1)
-        enc2_2 = self.enc2_1(enc2_1)
-        pool2 = self.pool1(enc2_2)
-        
-        enc3_1 = self.enc3_1(pool2)
-        enc3_2 = self.enc3_1(enc3_1)
-        pool3 = self.pool1(enc3_2)
-        
-        enc4_1 = self.enc1_1(pool2)
-        enc4_2 = self.enc1_1(enc4_1)
-        pool4 = self.pool1(enc4_2)
-        
-        enc5_1 = self.enc1_1(pool4)
-        
-        # 2. Connect the Decoder part
-        dec5_1 = self.dec5_1(enc5_1) 
-        
-        unpool4 = self.unpool4(dec5_1)
-        cat4 = torch.cat((unpool4, enc4_2), dim = 1) # dim = [0: batch, 1: channel, 2: height, 3: width] each direction
-        dec4_2 = self.dec4_2(cat4)
-        dec4_1 = self.dec4_1(dec4_2)
-        
-        unpool3 = self.unpool3(dec4_1)
-        cat3 = torch.cat((unpool3, enc3_2), dim = 1) 
-        dec3_2 = self.dec3_2(cat3)
-        dec3_1 = self.dec3_1(dec3_2)
-        
-        unpool2 = self.unpool2(dec3_1)
-        cat2 = torch.cat((unpool2, enc2_2), dim = 1) 
-        dec2_2 = self.dec2_2(cat2)
-        dec2_1 = self.dec2_1(dec2_2)
-        
-        unpool1 = self.unpool1(dec2_1)
-        cat1 = torch.cat((unpool1, enc1_2), dim = 1) 
-        dec1_2 = self.dec1_2(cat1)
-        dec1_1 = self.dec1_1(dec1_2)
-        
-        x = self.fc(dec1_1)
-        
-        return x
-        
+                # Calculate Loss
+                loss = fn_loss(output, label)
 
+                loss_arr += [loss.item()]
 
-# Create a Data Loader
-class DataSet(torch.utils.data.Dataset):
-    def __inti__(self, data_dir, transform = None):
-        self.data_dir = data_dir
-        self.transform = transform
+                print("VALID: EPOCH %04d / %04d | BATCH %04d / %04d | LOSS %.4f" %
+                        (epoch, num_epoch, batch, num_batch_val, np.mean(loss_arr)))
+
+                # Tensorboard Output
+                label = fn_tonumpy(label)
+                input = fn_tonumpy(fn_denorm(input, mean=0.5, std=0.5))
+                output = fn_tonumpy(fn_class(output))
+
+                writer_val.add_image('label', label, num_batch_val * (epoch - 1) + batch, dataformats='NHWC')
+                writer_val.add_image('input', input, num_batch_val * (epoch - 1) + batch, dataformats='NHWC')
+                writer_val.add_image('output', output, num_batch_val * (epoch - 1) + batch, dataformats='NHWC')
+
+        writer_val.add_scalar('loss', np.mean(loss_arr), epoch)
         
-        lst_data = os.listdir(self.data_dir)
-        # arrange the data that are in directory we created
-        lst_label = [f for f in lst_data if f.startswith('label')]
-        lst_input = [f for f in lst_data if f.startswith('input')]
-        # sort by number
-        lst_label.sort()
-        lst_input.sort()
-        # Take these as our parameters
-        self.lst_label = lst_label
-        self.lst_input = lst_input
-    def __len__(self):
-        return len(self.lst_label)
-    
-    def __getitem__(self, index):
-        label = np.load(os.path.join(self.data_dir, self.lst_label[index]))
-        input = np.load(os.path.join(self.data_dir, self.lst_input[index]))
+        # For every 50 epoch save the model
+        if epoch % 50 == 0:
+            save(ckpt_dir=ckpt_dir, net=net, optim=optim, epoch=epoch)
+        
+    writer_train.close()
+    writer_val.close()    
+
+else:
+    # For evaludation we always use the model that's SAVED
+    net, optim, st_epoch = load(ckpt_dir=ckpt_dir, net=net, optim=optim)
+
+    with torch.no_grad():
+        net.eval()
+        loss_arr = []
+
+        for batch, data in enumerate(loader_test, 1):
+            # forward pass
+            label = data['label'].to(device)
+            input = data['input'].to(device)
+
+            output = net(input)
+
+            # Calculate Loss
+            loss = fn_loss(output, label)
+
+            loss_arr += [loss.item()]
+
+            print("TEST: BATCH %04d / %04d | LOSS %.4f" %
+                  (batch, num_batch_test, np.mean(loss_arr)))
+
+            # Tensorboard 
+            label = fn_tonumpy(label)
+            input = fn_tonumpy(fn_denorm(input, mean=0.5, std=0.5))
+            output = fn_tonumpy(fn_class(output))
+            
+            # Save output to numpy data
+
+            for j in range(label.shape[0]):
+                id = num_batch_test * (batch - 1) + j
+
+                plt.imsave(os.path.join(result_dir, 'png', 'label_%04d.png' % id), label[j].squeeze(), cmap='gray')
+                plt.imsave(os.path.join(result_dir, 'png', 'input_%04d.png' % id), input[j].squeeze(), cmap='gray')
+                plt.imsave(os.path.join(result_dir, 'png', 'output_%04d.png' % id), output[j].squeeze(), cmap='gray')
+
+                np.save(os.path.join(result_dir, 'numpy', 'label_%04d.npy' % id), label[j].squeeze())
+                np.save(os.path.join(result_dir, 'numpy', 'input_%04d.npy' % id), input[j].squeeze())
+                np.save(os.path.join(result_dir, 'numpy', 'output_%04d.npy' % id), output[j].squeeze())
+
+    print("AVERAGE TEST: BATCH %04d / %04d | LOSS %.4f" %
+          (batch, num_batch_test, np.mean(loss_arr)))    
