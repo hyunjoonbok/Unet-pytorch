@@ -9,7 +9,7 @@ From [Paper](https://lmb.informatik.uni-freiburg.de/people/ronneber/u-net/).
 The u-net is convolutional network architecture for fast and precise segmentation of images. Up to now it has outperformed the prior best method (a sliding-window convolutional network) on the ISBI challenge for segmentation of neuronal structures in electron microscopic stacks. It has won the Grand Challenge for Computer-Automated Detection of Caries in Bitewing Radiography at ISBI 2015, and it has won the Cell Tracking Challenge at ISBI 2015 on the two most challenging transmitted light microscopy categories (Phase contrast and DIC microscopy) by a large margin (See also our annoucement).
 
 #### Model Architecture
-![image](https://lh3.googleusercontent.com/proxy/QPt20YDpodsDn101p8mjMDMKoRL4o3ss6lyROCIMoZllQWvgE-RFEgd_m2SSDEKA5dSJLzgwZ5FMbwhQxMcfo2VR3JI9_2CX9g)
+![image](./img/u-net-architecture.png)
 
 ## Data
 - Dataset could be downloaded either from [this website](https://lmb.informatik.uni-freiburg.de/people/ronneber/u-net/) or [here](http://brainiac2.mit.edu/isbi_challenge/)(you would need to create log-in for this one)
